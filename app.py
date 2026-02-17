@@ -603,7 +603,12 @@ class RecordApp:
         self.current_record_id = rid
         self.refresh_records()
         self._export_to_word(title, body, created_at)
-        messagebox.showinfo("완료", f"기록이 저장되었습니다.\nDB: {self.db.db_path}")
+        db_location = str(Path(self.db.db_path).resolve())
+        self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
+        messagebox.showinfo(
+            "완료",
+            f"기록이 저장되었습니다.\n\nDB 저장 위치:\n{db_location}",
+        )
 
     def _export_to_word(self, title: str, body: str, created_at: str):
         if Document is None:
