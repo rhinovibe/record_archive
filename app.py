@@ -45,6 +45,7 @@ else:
 APP_DIR = Path(__file__).parent
 DEFAULT_EXPORT_PATH = r"D:\기록 프로젝트"
 CONFIG_PATH = APP_DIR / "config.json"
+SAVE_LOG_PATH = APP_DIR / "save_audit.log"
 
 
 def resolve_db_path() -> Path:
@@ -602,13 +603,21 @@ class RecordApp:
 
         self.current_record_id = rid
         self.refresh_records()
-        self._export_to_word(title, body, created_at)
         db_location = str(Path(self.db.db_path).resolve())
         self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
         messagebox.showinfo(
             "완료",
             f"기록이 저장되었습니다.\n\nDB 저장 위치:\n{db_location}",
         )
+
+        try:
+            SAVE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with SAVE_LOG_PATH.open("a", encoding="utf-8") as fp:
+                fp.write(f"{datetime.now().isoformat(timespec='seconds')} | rid={rid} | db={db_location}\n")
+        except Exception:
+            pass
+
+        self._export_to_word(title, body, created_at)
 
     def _export_to_word(self, title: str, body: str, created_at: str):
         if Document is None:

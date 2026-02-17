@@ -5,3 +5,5 @@ config.json
 build/
 dist/
 *.spec
+
+save_audit.log
