@@ -68,29 +68,24 @@ def _can_open_sqlite(db_file: Path) -> bool:
 def resolve_db_path() -> tuple[Path, str | None]:
     preferred = Path(DEFAULT_EXPORT_PATH) / "records.db"
     legacy = APP_DIR / "records.db"
-    home_fallback = Path.home() / "record_archive" / "records.db"
 
-    # Windows에서는 기본 경로 우선, 실패 시 사용자 홈/실행 폴더로 폴백
+    # Windows에서는 요청한 경로(C:\record_archive)를 고정으로 사용한다.
     if os.name == "nt":
-        errors = []
-        for candidate in (preferred, home_fallback, legacy):
-            try:
-                candidate.parent.mkdir(parents=True, exist_ok=True)
-                if candidate == preferred and not candidate.exists() and legacy.exists():
-                    shutil.copy2(legacy, candidate)
-                if _can_open_sqlite(candidate):
-                    note = None
-                    if candidate != preferred:
-                        note = (
-                            f"기본 DB 경로({preferred})를 사용할 수 없어 "
-                            f"대체 경로({candidate})를 사용합니다."
-                        )
-                    return candidate, note
-                errors.append(f"{candidate}: sqlite open failed")
-            except Exception as exc:
-                errors.append(f"{candidate}: {exc}")
-                continue
-        return legacy, "DB 경로 확인 실패로 실행 파일 폴더 DB를 사용합니다. " + " | ".join(errors)
+        try:
+            preferred.parent.mkdir(parents=True, exist_ok=True)
+            if not preferred.exists() and legacy.exists():
+                shutil.copy2(legacy, preferred)
+            if _can_open_sqlite(preferred):
+                return preferred, None
+            return preferred, (
+                f"지정된 DB 경로({preferred})에 쓰기/생성이 불가능합니다. "
+                "관리자 권한으로 실행하거나 폴더 권한을 확인해 주세요."
+            )
+        except Exception as exc:
+            return preferred, (
+                f"지정된 DB 경로({preferred}) 초기화 실패: {exc}. "
+                "관리자 권한으로 실행하거나 폴더 권한을 확인해 주세요."
+            )
 
     # 비-Windows 개발 환경에서는 저장소 로컬 DB 사용
     return legacy, None
@@ -299,7 +294,12 @@ class RecordApp:
         self.root = root
         self.root.title("기록 관리 프로그램")
         self.root.geometry("1100x700")
-        self.db = RecordDB(DB_PATH)
+        self.db = None
+        self.db_init_error = None
+        try:
+            self.db = RecordDB(DB_PATH)
+        except Exception as exc:
+            self.db_init_error = str(exc)
         self.export_path = self._load_export_path()
         self.current_record_id = None
 
@@ -312,11 +312,18 @@ class RecordApp:
         self._build_ui()
         if DB_PATH_WARNING:
             self._show_forced_popup("DB 경로 안내", DB_PATH_WARNING)
+        if self.db_init_error:
+            self._show_forced_popup(
+                "DB 초기화 실패",
+                f"DB를 열 수 없습니다.\n경로: {DB_PATH}\n오류: {self.db_init_error}",
+            )
         self._ensure_db_file_visible()
         self.refresh_records()
 
 
     def _ensure_db_file_visible(self):
+        if not self._require_db():
+            return
         db_path = Path(self.db.db_path)
         if db_path.exists():
             return
@@ -328,6 +335,17 @@ class RecordApp:
             f"현재 DB 경로: {db_path}\n\n"
             "쓰기 권한이 있는지 확인해 주세요.",
         )
+
+    def _require_db(self) -> bool:
+        if self.db is not None:
+            return True
+        detail = self.db_init_error or "알 수 없는 오류"
+        self.status.configure(text=f"DB 비활성화 | 경로: {DB_PATH} | 오류: {detail}")
+        self._show_forced_popup(
+            "DB 사용 불가",
+            f"DB를 사용할 수 없습니다.\n경로: {DB_PATH}\n오류: {detail}",
+        )
+        return False
 
     def _load_export_path(self) -> str:
         if CONFIG_PATH.exists():
@@ -458,6 +476,8 @@ class RecordApp:
 
     def populate_primary_attributes(self):
         self.primary_list.delete(0, END)
+        if not self._require_db():
+            return
         self.primary_map.clear()
         for idx, row in enumerate(self.db.get_attributes_by_parent(None)):
             self.primary_list.insert(END, row["name"])
@@ -508,6 +528,9 @@ class RecordApp:
                 idx += 1
 
     def refresh_records(self):
+        if not self._require_db():
+            self._render_record_list([])
+            return
         self._render_record_list(self.db.list_records())
 
     def _render_record_list(self, records: list[RecordSummary]):
@@ -518,6 +541,10 @@ class RecordApp:
             self._record_index[i] = rec.record_id
 
     def perform_search(self):
+        if not self._require_db():
+            self._render_record_list([])
+            return
+
         any_selected = any(
             [self.search_attr.get(), self.search_date.get(), self.search_title.get(), self.search_body.get()]
         )
@@ -532,6 +559,9 @@ class RecordApp:
         self._render_record_list(records)
 
     def on_select_record(self, _event=None):
+        if not self._require_db():
+            return
+
         sel = self.record_list.curselection()
         if not sel:
             return
@@ -545,6 +575,9 @@ class RecordApp:
         )
 
     def load_selected_for_edit(self):
+        if not self._require_db():
+            return
+
         sel = self.record_list.curselection()
         if not sel:
             messagebox.showwarning("안내", "편집할 기록을 선택하세요.")
@@ -600,6 +633,9 @@ class RecordApp:
         return [name.strip() for name in raw.split(",") if name.strip()]
 
     def _resolve_attribute_ids(self):
+        if not self._require_db():
+            raise RuntimeError("DB를 사용할 수 없습니다.")
+
         selected_primary = self.primary_list.curselection()
         primary_names = self._parse_new_attribute_names(self.primary_new.get().strip())
         if not selected_primary and not primary_names:
@@ -637,6 +673,9 @@ class RecordApp:
         return list(primary_ids | secondary_ids | tertiary_ids)
 
     def save_record(self):
+        if not self._require_db():
+            return
+
         title = self.title_entry.get().strip()
         body = self.body_text.get("1.0", END).strip()
         if not title or not body:
