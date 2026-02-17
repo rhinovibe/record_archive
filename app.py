@@ -482,6 +482,7 @@ class RecordApp:
         popup.lift()
         popup.attributes("-topmost", True)
         popup.after(300, lambda: popup.attributes("-topmost", False))
+        self.root.wait_window(popup)
 
     def change_export_path(self):
         selected = filedialog.askdirectory(title="워드 저장 경로 선택")
