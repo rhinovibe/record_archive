@@ -49,28 +49,54 @@ CONFIG_PATH = APP_DIR / "config.json"
 SAVE_LOG_PATH = APP_DIR / "save_audit.log"
 
 
-def resolve_db_path() -> Path:
+def _can_open_sqlite(db_file: Path) -> bool:
+    """DB 파일 경로가 실제로 쓰기 가능한지 확인한다."""
+    conn = None
+    try:
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_file, timeout=3)
+        conn.execute("PRAGMA user_version")
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def resolve_db_path() -> tuple[Path, str | None]:
     preferred = Path(DEFAULT_EXPORT_PATH) / "records.db"
     legacy = APP_DIR / "records.db"
     home_fallback = Path.home() / "record_archive" / "records.db"
 
-    # Windows에서는 D: 우선, 실패 시 사용자 홈 경로로 폴백
+    # Windows에서는 기본 경로 우선, 실패 시 사용자 홈/실행 폴더로 폴백
     if os.name == "nt":
+        errors = []
         for candidate in (preferred, home_fallback, legacy):
             try:
                 candidate.parent.mkdir(parents=True, exist_ok=True)
                 if candidate == preferred and not candidate.exists() and legacy.exists():
                     shutil.copy2(legacy, candidate)
-                return candidate
-            except Exception:
+                if _can_open_sqlite(candidate):
+                    note = None
+                    if candidate != preferred:
+                        note = (
+                            f"기본 DB 경로({preferred})를 사용할 수 없어 "
+                            f"대체 경로({candidate})를 사용합니다."
+                        )
+                    return candidate, note
+                errors.append(f"{candidate}: sqlite open failed")
+            except Exception as exc:
+                errors.append(f"{candidate}: {exc}")
                 continue
-        return legacy
+        return legacy, "DB 경로 확인 실패로 실행 파일 폴더 DB를 사용합니다. " + " | ".join(errors)
 
     # 비-Windows 개발 환경에서는 저장소 로컬 DB 사용
-    return legacy
+    return legacy, None
 
 
-DB_PATH = resolve_db_path()
+DB_PATH, DB_PATH_WARNING = resolve_db_path()
 
 
 def normalize_filename(name: str) -> str:
@@ -284,6 +310,8 @@ class RecordApp:
         self.search_body = BooleanVar(value=True)
 
         self._build_ui()
+        if DB_PATH_WARNING:
+            messagebox.showwarning("DB 경로 안내", DB_PATH_WARNING)
         self.refresh_records()
 
     def _load_export_path(self) -> str:
@@ -375,7 +403,10 @@ class RecordApp:
         self.status = Message(
             right,
             width=700,
-            text=f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}",
+            text=(
+                f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}"
+                + (f" | {DB_PATH_WARNING}" if DB_PATH_WARNING else "")
+            ),
         )
         self.status.pack(fill=X)
 
@@ -403,7 +434,12 @@ class RecordApp:
         if selected:
             self.export_path = selected
             self._save_export_path()
-            self.status.configure(text=f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}")
+            self.status.configure(
+                text=(
+                    f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}"
+                    + (f" | {DB_PATH_WARNING}" if DB_PATH_WARNING else "")
+                )
+            )
 
     def populate_primary_attributes(self):
         self.primary_list.delete(0, END)
