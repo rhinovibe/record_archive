@@ -24,24 +24,31 @@
   - 경로 변경 가능
   - `저장경로\YYYY-MM-DD\YYYY-MM-DD: 제목.docx` 형태로 저장
 
-## 실행 방법
+## 실행 방법 (개발 모드)
 
 ```bash
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-## EXE 빌드
+## EXE 빌드/실행 (Windows)
 
-Windows에서 아래 중 하나를 사용하세요.
-
-### 방법 1) 배치 파일 실행
+### 1) 빌드 + 실행 (권장)
 
 ```bat
 build_exe.bat
 ```
 
-### 방법 2) 직접 실행
+- `build_exe.bat`은 **의존성 설치 + EXE 빌드 후 자동 실행**합니다.
+- 창이 자동으로 안 떠도 `dist\record_archive.exe`가 생성되었는지 먼저 확인하세요.
+
+### 2) 이미 빌드된 EXE만 실행
+
+```bat
+run_app.bat
+```
+
+### 3) 수동 빌드
 
 ```bash
 python -m pip install -r requirements.txt

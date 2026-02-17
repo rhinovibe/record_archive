@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -27,14 +26,16 @@ from tkinter import (
     StringVar,
     Text,
     Tk,
-    Toplevel,
     filedialog,
     messagebox,
 )
 
-try:
-    from docx import Document
-except Exception:
+from importlib import import_module
+from importlib.util import find_spec
+
+if find_spec("docx") is not None:
+    Document = import_module("docx").Document
+else:
     Document = None
 
 
