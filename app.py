@@ -50,17 +50,19 @@ CONFIG_PATH = APP_DIR / "config.json"
 def resolve_db_path() -> Path:
     preferred = Path(DEFAULT_EXPORT_PATH) / "records.db"
     legacy = APP_DIR / "records.db"
+    home_fallback = Path.home() / "record_archive" / "records.db"
 
-    # Windows 배포 대상: D:\기록 프로젝트\records.db를 우선 사용
+    # Windows에서는 D: 우선, 실패 시 사용자 홈 경로로 폴백
     if os.name == "nt":
-        try:
-            preferred.parent.mkdir(parents=True, exist_ok=True)
-            if not preferred.exists() and legacy.exists():
-                shutil.copy2(legacy, preferred)
-            return preferred
-        except Exception:
-            # 드라이브 접근 실패 시 레거시 경로로 안전하게 폴백
-            return legacy
+        for candidate in (preferred, home_fallback, legacy):
+            try:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                if candidate == preferred and not candidate.exists() and legacy.exists():
+                    shutil.copy2(legacy, candidate)
+                return candidate
+            except Exception:
+                continue
+        return legacy
 
     # 비-Windows 개발 환경에서는 저장소 로컬 DB 사용
     return legacy
