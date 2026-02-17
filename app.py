@@ -186,7 +186,7 @@ class RecordDB:
         now = datetime.now().isoformat(timespec="seconds")
         cur = self.conn.cursor()
         try:
-            cur.execute("BEGIN IMMEDIATE")
+            cur.execute("BEGIN")
             if record_id:
                 cur.execute(
                     "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
@@ -200,19 +200,18 @@ class RecordDB:
                     (title, body, created_at, now),
                 )
                 rid = cur.lastrowid
-
             for attr_id in attribute_ids:
                 cur.execute(
                     "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
                     (rid, attr_id),
                 )
-
             self.conn.commit()
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return rid
         except Exception:
             self.conn.rollback()
             raise
+
 
     def verify_record_persisted(self, record_id: int) -> bool:
         """새 연결로 다시 읽어서 실제 디스크 반영 여부를 확인한다."""
