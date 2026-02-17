@@ -735,15 +735,32 @@ class RecordApp:
 
             if os.name == "nt":
                 expected_root = Path(DEFAULT_EXPORT_PATH)
-                try:
-                    db_parent = Path(self.db.db_path).parent.resolve()
-                    expected_parent = expected_root.resolve()
-                    if db_parent != expected_parent:
-                        raise RuntimeError(
-                            f"DB 경로가 예상과 다릅니다. 현재: {db_parent}, 예상: {expected_parent}"
-                        )
-                except Exception as path_exc:
-                    raise RuntimeError(f"DB 경로 확인 실패: {path_exc}") from path_exc
+                db_parent = Path(self.db.db_path).parent.resolve()
+                expected_parent = expected_root.resolve()
+                if db_parent != expected_parent:
+                    raise RuntimeError(
+                        f"DB 경로가 예상과 다릅니다. 현재: {db_parent}, 예상: {expected_parent}"
+                    )
+
+            self.current_record_id = rid
+            self.refresh_records()
+            db_location = str(Path(self.db.db_path).resolve())
+            self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
+            self._show_forced_popup(
+                "저장 완료",
+                f"기록이 저장되었습니다.\n\n레코드 ID: {rid}\nDB 저장 위치:\n{db_location}\nDB 파일 크기: {Path(self.db.db_path).stat().st_size} bytes",
+            )
+
+            try:
+                db_log_path = Path(self.db.db_path).parent / "save_audit.log"
+                db_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with db_log_path.open("a", encoding="utf-8") as fp:
+                    fp.write(f"{datetime.now().isoformat(timespec='seconds')} | rid={rid} | db={db_location}\n")
+            except Exception:
+                pass
+
+            self._export_to_word(title, body, created_at)
+
         except Exception as exc:
             self._show_forced_popup(
                 "저장 실패",
@@ -752,24 +769,6 @@ class RecordApp:
             self.status.configure(text=f"저장 실패 | DB 경로: {self.db.db_path} | 오류: {exc}")
             return
 
-        self.current_record_id = rid
-        self.refresh_records()
-        db_location = str(Path(self.db.db_path).resolve())
-        self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
-        self._show_forced_popup(
-            "저장 완료",
-            f"기록이 저장되었습니다.\n\n레코드 ID: {rid}\nDB 저장 위치:\n{db_location}\nDB 파일 크기: {Path(self.db.db_path).stat().st_size} bytes",
-        )
-
-        try:
-            db_log_path = Path(self.db.db_path).parent / "save_audit.log"
-            db_log_path.parent.mkdir(parents=True, exist_ok=True)
-            with db_log_path.open("a", encoding="utf-8") as fp:
-                fp.write(f"{datetime.now().isoformat(timespec='seconds')} | rid={rid} | db={db_location}\n")
-        except Exception:
-            pass
-
-        self._export_to_word(title, body, created_at)
 
     def _export_to_word(self, title: str, body: str, created_at: str):
         if Document is None:
