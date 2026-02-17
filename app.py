@@ -41,9 +41,9 @@ else:
 
 
 APP_DIR = Path(__file__).parent
-DB_PATH = APP_DIR / "records.db"
-CONFIG_PATH = APP_DIR / "config.json"
 DEFAULT_EXPORT_PATH = r"D:\기록 프로젝트"
+DB_PATH = Path(DEFAULT_EXPORT_PATH) / "records.db"
+CONFIG_PATH = APP_DIR / "config.json"
 
 
 def normalize_filename(name: str) -> str:
@@ -59,6 +59,7 @@ class RecordSummary:
 
 class RecordDB:
     def __init__(self, db_path: Path):
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()

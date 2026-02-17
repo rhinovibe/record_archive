@@ -61,5 +61,5 @@ pyinstaller --noconfirm --onefile --windowed --name record_archive app.py
 
 ## 저장 데이터
 
-- 로컬 DB: `records.db` (SQLite)
+- 로컬 DB: `D:\기록 프로젝트\records.db` (SQLite, 고정 경로)
 - 설정 파일: `config.json` (Word 저장 경로)
