@@ -50,11 +50,13 @@ build_exe.bat
 - `build_exe.bat`은 **의존성 설치 + EXE 빌드 후 자동 실행**합니다.
 - 창이 자동으로 안 떠도 `dist\record_archive.exe`가 생성되었는지 먼저 확인하세요.
 
-### 2) 이미 빌드된 EXE만 실행
+### 2) run_app.bat 실행 (매번 빌드 후 실행)
 
 ```bat
 run_app.bat
 ```
+
+- `run_app.bat`은 내부에서 `build_exe.bat`를 먼저 호출한 뒤 최신 EXE를 실행합니다.
 
 ### 3) 수동 빌드
 

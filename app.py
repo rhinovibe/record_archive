@@ -44,7 +44,7 @@ else:
 
 
 APP_DIR = Path(__file__).parent
-DEFAULT_EXPORT_PATH = r"C:\record_archive"
+DEFAULT_EXPORT_PATH = r"D:\기록 프로젝트"
 CONFIG_PATH = APP_DIR / "config.json"
 SAVE_LOG_PATH = APP_DIR / "save_audit.log"
 
@@ -69,7 +69,7 @@ def resolve_db_path() -> tuple[Path, str | None]:
     preferred = Path(DEFAULT_EXPORT_PATH) / "records.db"
     legacy = APP_DIR / "records.db"
 
-    # Windows에서는 요청한 경로(C:\record_archive)를 고정으로 사용한다.
+    # Windows에서는 요청한 경로(D:\기록 프로젝트)를 고정으로 사용한다.
     if os.name == "nt":
         try:
             preferred.parent.mkdir(parents=True, exist_ok=True)
