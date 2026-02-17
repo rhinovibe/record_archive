@@ -174,42 +174,59 @@ class RecordDB:
         return row, attrs
 
     def search_records(self, query: str, use_attr: bool, use_date: bool, use_title: bool, use_body: bool):
-        if not query.strip():
+        normalized = query.strip()
+        if not normalized:
             return self.list_records()
-        q = f"%{query.strip()}%"
+
+        tokens = [token for token in normalized.split() if token]
+        if not tokens:
+            return self.list_records()
+
         ids = set()
+
         if use_title or use_body or use_date:
-            clauses = []
-            params = []
+            field_clauses = []
             if use_title:
-                clauses.append("title LIKE ?")
-                params.append(q)
+                field_clauses.append("title LIKE ? COLLATE NOCASE")
             if use_body:
-                clauses.append("body LIKE ?")
-                params.append(q)
+                field_clauses.append("body LIKE ? COLLATE NOCASE")
             if use_date:
-                clauses.append("created_at LIKE ?")
-                params.append(q)
-            if clauses:
-                where = " OR ".join(clauses)
+                field_clauses.append("created_at LIKE ?")
+
+            if field_clauses:
+                token_clauses = []
+                params = []
+                for token in tokens:
+                    token_clauses.append("(" + " OR ".join(field_clauses) + ")")
+                    q = f"%{token}%"
+                    params.extend([q] * len(field_clauses))
+                where = " AND ".join(token_clauses)
                 rows = self.conn.execute(
                     f"SELECT id FROM records WHERE {where}",
                     params,
                 ).fetchall()
                 ids.update(r["id"] for r in rows)
+
         if use_attr:
+            attr_params = []
+            attr_where = []
+            for token in tokens:
+                attr_where.append("a.name LIKE ? COLLATE NOCASE")
+                attr_params.append(f"%{token}%")
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT DISTINCT ra.record_id as id
                 FROM record_attributes ra
                 JOIN attributes a ON ra.attribute_id = a.id
-                WHERE a.name LIKE ?
+                WHERE {' AND '.join(attr_where)}
                 """,
-                (q,),
+                tuple(attr_params),
             ).fetchall()
             ids.update(r["id"] for r in rows)
+
         if not ids:
             return []
+
         placeholders = ",".join(["?"] * len(ids))
         rows = self.conn.execute(
             f"SELECT id, title, created_at FROM records WHERE id IN ({placeholders}) ORDER BY created_at DESC",
