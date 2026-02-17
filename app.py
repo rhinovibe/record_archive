@@ -184,8 +184,9 @@ class RecordDB:
 
     def save_record(self, title: str, body: str, created_at: str, attribute_ids: list[int], record_id=None):
         now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            cur = self.conn.cursor()
+        cur = self.conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
             if record_id:
                 cur.execute(
                     "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
@@ -199,15 +200,19 @@ class RecordDB:
                     (title, body, created_at, now),
                 )
                 rid = cur.lastrowid
+
             for attr_id in attribute_ids:
                 cur.execute(
                     "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
                     (rid, attr_id),
                 )
 
-        self.conn.commit()
-        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return rid
+            self.conn.commit()
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return rid
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def verify_record_persisted(self, record_id: int) -> bool:
         """새 연결로 다시 읽어서 실제 디스크 반영 여부를 확인한다."""
