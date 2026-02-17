@@ -210,6 +210,11 @@ class RecordDB:
         except Exception:
             raise
 
+    def delete_record(self, record_id: int):
+        with self.conn:
+            self.conn.execute("DELETE FROM record_attributes WHERE record_id = ?", (record_id,))
+            self.conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
+
 
     def verify_record_persisted(self, record_id: int) -> bool:
         """새 연결로 다시 읽어서 실제 디스크 반영 여부를 확인한다."""
@@ -323,6 +328,7 @@ class RecordApp:
             self.db_init_error = str(exc)
         self.export_path = self._load_export_path()
         self.current_record_id = None
+        self.attribute_levels = []
 
         self.search_query = StringVar()
         self.search_attr = BooleanVar(value=True)
@@ -422,6 +428,7 @@ class RecordApp:
         Button(header, text="새 기록", command=self.new_record).pack(side=LEFT, padx=4)
         Button(header, text="저장", command=self.save_record).pack(side=LEFT, padx=4)
         Button(header, text="선택 기록 편집", command=self.load_selected_for_edit).pack(side=LEFT, padx=4)
+        Button(header, text="선택 기록 삭제", command=self.delete_selected_record).pack(side=LEFT, padx=4)
 
         Label(right, text="제목").pack(anchor="w")
         self.title_entry = Entry(right)
@@ -433,26 +440,13 @@ class RecordApp:
 
         attr = LabelFrame(right, text="Attribute 지정")
         attr.pack(fill=X, pady=8)
+        self.attr_frame = attr
+        self.add_level_button = Button(attr, text="+ 차수 추가", command=self.add_attribute_level)
 
-        Label(attr, text="1차 Attribute (필수)").grid(row=0, column=0, sticky="w", padx=5)
-        self.primary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
-        self.primary_list.grid(row=1, column=0, padx=5)
-        self.primary_list.bind("<<ListboxSelect>>", self.on_primary_change)
-        self.primary_new = Entry(attr)
-        self.primary_new.grid(row=2, column=0, padx=5, pady=4)
-
-        Label(attr, text="2차 Attribute (선택)").grid(row=0, column=1, sticky="w", padx=5)
-        self.secondary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
-        self.secondary_list.grid(row=1, column=1, padx=5)
-        self.secondary_list.bind("<<ListboxSelect>>", self.on_secondary_change)
-        self.secondary_new = Entry(attr)
-        self.secondary_new.grid(row=2, column=1, padx=5, pady=4)
-
-        Label(attr, text="3차 Attribute (선택)").grid(row=0, column=2, sticky="w", padx=5)
-        self.tertiary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
-        self.tertiary_list.grid(row=1, column=2, padx=5)
-        self.tertiary_new = Entry(attr)
-        self.tertiary_new.grid(row=2, column=2, padx=5, pady=4)
+        self._create_attribute_level_ui(1)
+        self._create_attribute_level_ui(2)
+        self._create_attribute_level_ui(3)
+        self._render_add_level_button()
 
         self.status = Message(
             right,
@@ -464,10 +458,7 @@ class RecordApp:
         )
         self.status.pack(fill=X)
 
-        self.primary_map = {}
-        self.secondary_map = {}
-        self.tertiary_map = {}
-        self.populate_primary_attributes()
+        self.populate_root_attributes()
 
     def _show_forced_popup(self, title: str, content: str):
         popup = Toplevel(self.root)
@@ -496,57 +487,71 @@ class RecordApp:
                 )
             )
 
-    def populate_primary_attributes(self):
-        self.primary_list.delete(0, END)
+    def _create_attribute_level_ui(self, level: int):
+        col = level - 1
+        required = " (필수)" if level == 1 else " (선택)"
+        label = Label(self.attr_frame, text=f"{level}차 Attribute{required}")
+        label.grid(row=0, column=col, sticky="w", padx=5)
+
+        listbox = Listbox(self.attr_frame, height=6, exportselection=False, selectmode=EXTENDED)
+        listbox.grid(row=1, column=col, padx=5)
+        listbox.bind("<<ListboxSelect>>", lambda _event, lv=level: self.on_attribute_level_change(lv))
+
+        entry = Entry(self.attr_frame)
+        entry.grid(row=2, column=col, padx=5, pady=4)
+
+        self.attribute_levels.append({"level": level, "label": label, "listbox": listbox, "entry": entry, "map": {}})
+
+    def _render_add_level_button(self):
+        self.add_level_button.grid(row=3, column=0, columnspan=max(1, len(self.attribute_levels)), pady=(2, 4), sticky="w")
+
+    def add_attribute_level(self):
+        self._create_attribute_level_ui(len(self.attribute_levels) + 1)
+        self._render_add_level_button()
+
+    def _get_level_ui(self, level: int):
+        return self.attribute_levels[level - 1]
+
+    def _selected_ids_for_level(self, level: int) -> set[int]:
+        level_ui = self._get_level_ui(level)
+        return {level_ui["map"][idx] for idx in level_ui["listbox"].curselection() if idx in level_ui["map"]}
+
+    def _clear_levels_from(self, start_level: int):
+        for level in range(start_level, len(self.attribute_levels) + 1):
+            level_ui = self._get_level_ui(level)
+            level_ui["listbox"].delete(0, END)
+            level_ui["map"].clear()
+
+    def populate_root_attributes(self):
         if not self._require_db():
             return
-        self.primary_map.clear()
+        level1 = self._get_level_ui(1)
+        level1["listbox"].delete(0, END)
+        level1["map"].clear()
         for idx, row in enumerate(self.db.get_attributes_by_parent(None)):
-            self.primary_list.insert(END, row["name"])
-            self.primary_map[idx] = row["id"]
+            level1["listbox"].insert(END, row["name"])
+            level1["map"][idx] = row["id"]
+        self._clear_levels_from(2)
 
-    def on_primary_change(self, _event=None):
-        self.secondary_list.delete(0, END)
-        self.secondary_map.clear()
-        self.tertiary_list.delete(0, END)
-        self.tertiary_map.clear()
-
-        selections = self.primary_list.curselection()
-        if not selections:
+    def on_attribute_level_change(self, level: int):
+        self._clear_levels_from(level + 1)
+        if level >= len(self.attribute_levels):
             return
 
-        idx = 0
+        parent_ids = self._selected_ids_for_level(level)
+        if not parent_ids:
+            return
+
+        next_level = self._get_level_ui(level + 1)
         seen = set()
-        for selected_idx in selections:
-            pid = self.primary_map.get(selected_idx)
-            primary_name = self.primary_list.get(selected_idx)
-            for row in self.db.get_attributes_by_parent(pid):
+        idx = 0
+        for parent_id in parent_ids:
+            for row in self.db.get_attributes_by_parent(parent_id):
                 if row["id"] in seen:
                     continue
                 seen.add(row["id"])
-                self.secondary_list.insert(END, f"{primary_name} > {row['name']}")
-                self.secondary_map[idx] = row["id"]
-                idx += 1
-
-    def on_secondary_change(self, _event=None):
-        self.tertiary_list.delete(0, END)
-        self.tertiary_map.clear()
-
-        selections = self.secondary_list.curselection()
-        if not selections:
-            return
-
-        idx = 0
-        seen = set()
-        for selected_idx in selections:
-            sid = self.secondary_map.get(selected_idx)
-            secondary_label = self.secondary_list.get(selected_idx)
-            for row in self.db.get_attributes_by_parent(sid):
-                if row["id"] in seen:
-                    continue
-                seen.add(row["id"])
-                self.tertiary_list.insert(END, f"{secondary_label} > {row['name']}")
-                self.tertiary_map[idx] = row["id"]
+                next_level["listbox"].insert(END, row["name"])
+                next_level["map"][idx] = row["id"]
                 idx += 1
 
     def refresh_records(self):
@@ -614,41 +619,70 @@ class RecordApp:
         self.body_text.delete("1.0", END)
         self.body_text.insert("1.0", row["body"])
 
-        self.primary_list.selection_clear(0, END)
-        self.secondary_list.selection_clear(0, END)
-        self.tertiary_list.selection_clear(0, END)
+        max_level = max([a["level"] for a in attrs], default=1)
+        while len(self.attribute_levels) < max_level:
+            self.add_attribute_level()
 
-        level1_ids = {a["id"] for a in attrs if a["level"] == 1}
-        level2_ids = {a["id"] for a in attrs if a["level"] == 2}
-        level3_ids = {a["id"] for a in attrs if a["level"] == 3}
+        self.populate_root_attributes()
+        for level_ui in self.attribute_levels:
+            level_ui["listbox"].selection_clear(0, END)
+            level_ui["entry"].delete(0, END)
 
-        if level1_ids:
-            for idx, aid in self.primary_map.items():
-                if aid in level1_ids:
-                    self.primary_list.selection_set(idx)
-            self.on_primary_change()
-        if level2_ids:
-            for idx, aid in self.secondary_map.items():
-                if aid in level2_ids:
-                    self.secondary_list.selection_set(idx)
-            self.on_secondary_change()
-        if level3_ids:
-            for idx, aid in self.tertiary_map.items():
-                if aid in level3_ids:
-                    self.tertiary_list.selection_set(idx)
+        ids_by_level = {}
+        for attr in attrs:
+            ids_by_level.setdefault(attr["level"], set()).add(attr["id"])
+
+        for level in range(1, len(self.attribute_levels) + 1):
+            selected_ids = ids_by_level.get(level, set())
+            if not selected_ids:
+                break
+            level_ui = self._get_level_ui(level)
+            for idx, aid in level_ui["map"].items():
+                if aid in selected_ids:
+                    level_ui["listbox"].selection_set(idx)
+            self.on_attribute_level_change(level)
+
+    def delete_selected_record(self):
+        if not self._require_db():
+            return
+
+        sel = self.record_list.curselection()
+        if not sel:
+            self._show_forced_popup("안내", "삭제할 기록을 선택하세요.")
+            return
+
+        rid = self._record_index.get(sel[0])
+        if rid is None:
+            return
+
+        row, _ = self.db.get_record(rid)
+        if not row:
+            self._show_forced_popup("안내", "삭제할 기록을 찾지 못했습니다.")
+            return
+
+        if not messagebox.askyesno("삭제 확인", f"선택한 기록을 삭제하시겠습니까?\n\nID: {rid}\n제목: {row['title']}"):
+            return
+
+        try:
+            self.db.delete_record(rid)
+            if self.current_record_id == rid:
+                self.current_record_id = None
+            self.refresh_records()
+            self.new_record()
+            self.status.configure(text=f"삭제 완료 | ID: {rid} | 제목: {row['title']}")
+            self._show_forced_popup("삭제 완료", f"기록(ID: {rid})을 DB에서 삭제했습니다.")
+        except Exception as exc:
+            self.status.configure(text=f"삭제 실패 | ID: {rid} | 오류: {exc}")
+            self._show_forced_popup("삭제 실패", f"기록 삭제 중 오류가 발생했습니다.\n\n오류: {exc}")
 
     def new_record(self):
         self.current_record_id = None
         self.title_entry.delete(0, END)
         self.body_text.delete("1.0", END)
-        self.primary_list.selection_clear(0, END)
-        self.secondary_list.delete(0, END)
-        self.secondary_list.selection_clear(0, END)
-        self.tertiary_list.delete(0, END)
-        self.tertiary_list.selection_clear(0, END)
-        self.primary_new.delete(0, END)
-        self.secondary_new.delete(0, END)
-        self.tertiary_new.delete(0, END)
+        self.populate_root_attributes()
+        for level_ui in self.attribute_levels:
+            level_ui["listbox"].selection_clear(0, END)
+            level_ui["entry"].delete(0, END)
 
     @staticmethod
     def _parse_new_attribute_names(raw: str):
@@ -658,41 +692,42 @@ class RecordApp:
         if not self._require_db():
             raise RuntimeError("DB를 사용할 수 없습니다.")
 
-        selected_primary = self.primary_list.curselection()
-        primary_names = self._parse_new_attribute_names(self.primary_new.get().strip())
-        if not selected_primary and not primary_names:
-            raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
+        all_ids = set()
+        parent_ids = None
 
-        primary_ids = {self.primary_map[idx] for idx in selected_primary}
-        for primary_name in primary_names:
-            primary_ids.add(self.db.find_or_create_attribute(primary_name, 1, None))
+        for level in range(1, len(self.attribute_levels) + 1):
+            level_ui = self._get_level_ui(level)
+            selected_ids = self._selected_ids_for_level(level)
+            new_names = self._parse_new_attribute_names(level_ui["entry"].get().strip())
 
-        if primary_names:
-            self.populate_primary_attributes()
+            if level == 1 and not selected_ids and not new_names:
+                raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
 
-        selected_secondary = self.secondary_list.curselection()
-        secondary_names = self._parse_new_attribute_names(self.secondary_new.get().strip())
-        secondary_ids = {self.secondary_map[idx] for idx in selected_secondary}
+            if new_names and level > 1 and not parent_ids:
+                raise ValueError(f"{level}차 Attribute를 추가하려면 {level - 1}차를 먼저 선택하세요.")
 
-        for secondary_name in secondary_names:
-            for p_id in primary_ids:
-                secondary_ids.add(self.db.find_or_create_attribute(secondary_name, 2, p_id))
+            created_ids = set()
+            for name in new_names:
+                if level == 1:
+                    created_ids.add(self.db.find_or_create_attribute(name, level, None))
+                else:
+                    for p_id in parent_ids:
+                        created_ids.add(self.db.find_or_create_attribute(name, level, p_id))
 
-        if secondary_names:
-            self.on_primary_change()
+            current_ids = selected_ids | created_ids
+            if level == 1 and not current_ids:
+                raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
 
-        selected_tertiary = self.tertiary_list.curselection()
-        tertiary_names = self._parse_new_attribute_names(self.tertiary_new.get().strip())
-        tertiary_ids = {self.tertiary_map[idx] for idx in selected_tertiary}
+            all_ids |= current_ids
+            parent_ids = current_ids
 
-        for tertiary_name in tertiary_names:
-            for s_id in secondary_ids:
-                tertiary_ids.add(self.db.find_or_create_attribute(tertiary_name, 3, s_id))
+            if new_names:
+                if level == 1:
+                    self.populate_root_attributes()
+                else:
+                    self.on_attribute_level_change(level - 1)
 
-        if tertiary_names:
-            self.on_secondary_change()
-
-        return list(primary_ids | secondary_ids | tertiary_ids)
+        return list(all_ids)
 
     def save_record(self):
         if not self._require_db():
@@ -792,6 +827,8 @@ class RecordApp:
             target_dir.mkdir(parents=True, exist_ok=True)
             filename = normalize_filename(f"{date_folder}: {title}") + ".docx"
             output_path = target_dir / filename
+            if output_path.exists():
+                output_path.unlink()
             doc = Document()
             doc.add_heading(title, level=1)
             doc.add_paragraph(f"기록일시: {created_at}")
