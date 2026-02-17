@@ -29,6 +29,7 @@ from tkinter import (
     StringVar,
     Text,
     Tk,
+    Toplevel,
     filedialog,
     messagebox,
 )
@@ -383,6 +384,20 @@ class RecordApp:
         self.tertiary_map = {}
         self.populate_primary_attributes()
 
+    def _show_forced_popup(self, title: str, content: str):
+        popup = Toplevel(self.root)
+        popup.title(title)
+        popup.geometry("520x220")
+        popup.transient(self.root)
+        popup.grab_set()
+
+        Message(popup, width=480, text=content).pack(fill=BOTH, expand=True, padx=12, pady=12)
+        Button(popup, text="확인", command=popup.destroy).pack(pady=(0, 12))
+
+        popup.lift()
+        popup.attributes("-topmost", True)
+        popup.after(300, lambda: popup.attributes("-topmost", False))
+
     def change_export_path(self):
         selected = filedialog.askdirectory(title="워드 저장 경로 선택")
         if selected:
@@ -605,8 +620,8 @@ class RecordApp:
         self.refresh_records()
         db_location = str(Path(self.db.db_path).resolve())
         self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
-        messagebox.showinfo(
-            "완료",
+        self._show_forced_popup(
+            "저장 완료",
             f"기록이 저장되었습니다.\n\nDB 저장 위치:\n{db_location}",
         )
 
