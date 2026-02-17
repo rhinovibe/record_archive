@@ -536,25 +536,28 @@ class RecordApp:
                 created_at = existing["created_at"]
 
         rid = self.db.save_record(title, body, created_at, attribute_ids, self.current_record_id)
-        self._export_to_word(title, body, created_at)
         self.current_record_id = rid
         self.refresh_records()
+        self._export_to_word(title, body, created_at)
         messagebox.showinfo("완료", "기록이 저장되었습니다.")
 
     def _export_to_word(self, title: str, body: str, created_at: str):
         if Document is None:
             self.status.configure(text="python-docx가 없어 워드 저장을 건너뜀")
             return
-        date_folder = created_at[:10]
-        target_dir = Path(self.export_path) / date_folder
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = normalize_filename(f"{date_folder}: {title}") + ".docx"
-        doc = Document()
-        doc.add_heading(title, level=1)
-        doc.add_paragraph(f"기록일시: {created_at}")
-        doc.add_paragraph(body)
-        doc.save(target_dir / filename)
-        self.status.configure(text=f"워드 저장 완료: {target_dir / filename}")
+        try:
+            date_folder = created_at[:10]
+            target_dir = Path(self.export_path) / date_folder
+            target_dir.mkdir(parents=True, exist_ok=True)
+            filename = normalize_filename(f"{date_folder}: {title}") + ".docx"
+            doc = Document()
+            doc.add_heading(title, level=1)
+            doc.add_paragraph(f"기록일시: {created_at}")
+            doc.add_paragraph(body)
+            doc.save(target_dir / filename)
+            self.status.configure(text=f"워드 저장 완료: {target_dir / filename}")
+        except Exception as exc:
+            self.status.configure(text=f"워드 저장 실패(기록 본문 저장은 완료): {exc}")
 
 
 def main():
