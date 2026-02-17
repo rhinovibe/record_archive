@@ -311,8 +311,23 @@ class RecordApp:
 
         self._build_ui()
         if DB_PATH_WARNING:
-            messagebox.showwarning("DB 경로 안내", DB_PATH_WARNING)
+            self._show_forced_popup("DB 경로 안내", DB_PATH_WARNING)
+        self._ensure_db_file_visible()
         self.refresh_records()
+
+
+    def _ensure_db_file_visible(self):
+        db_path = Path(self.db.db_path)
+        if db_path.exists():
+            return
+
+        self.status.configure(text=f"DB 파일 생성 실패 | DB 경로: {db_path}")
+        self._show_forced_popup(
+            "DB 파일 확인 필요",
+            "DB 파일이 생성되지 않았습니다.\n"
+            f"현재 DB 경로: {db_path}\n\n"
+            "쓰기 권한이 있는지 확인해 주세요.",
+        )
 
     def _load_export_path(self) -> str:
         if CONFIG_PATH.exists():
@@ -625,12 +640,14 @@ class RecordApp:
         title = self.title_entry.get().strip()
         body = self.body_text.get("1.0", END).strip()
         if not title or not body:
-            messagebox.showwarning("안내", "제목과 본문을 입력하세요.")
+            self.status.configure(text="저장 실패 | 제목과 본문을 입력하세요.")
+            self._show_forced_popup("안내", "제목과 본문을 입력하세요.")
             return
         try:
             attribute_ids = self._resolve_attribute_ids()
         except ValueError as e:
-            messagebox.showwarning("안내", str(e))
+            self.status.configure(text=f"저장 실패 | {e}")
+            self._show_forced_popup("안내", str(e))
             return
 
         created_at = datetime.now().isoformat(timespec="seconds")
@@ -645,7 +662,7 @@ class RecordApp:
             if not persisted:
                 raise RuntimeError("저장 직후 DB에서 레코드를 다시 찾지 못했습니다.")
         except Exception as exc:
-            messagebox.showerror(
+            self._show_forced_popup(
                 "저장 실패",
                 f"DB 저장 실패: {exc}\n\n현재 DB 경로: {self.db.db_path}",
             )
