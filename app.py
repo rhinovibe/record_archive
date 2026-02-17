@@ -184,32 +184,30 @@ class RecordDB:
 
     def save_record(self, title: str, body: str, created_at: str, attribute_ids: list[int], record_id=None):
         now = datetime.now().isoformat(timespec="seconds")
-        cur = self.conn.cursor()
         try:
-            cur.execute("BEGIN")
-            if record_id:
-                cur.execute(
-                    "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
-                    (title, body, now, record_id),
-                )
-                rid = record_id
-                cur.execute("DELETE FROM record_attributes WHERE record_id = ?", (rid,))
-            else:
-                cur.execute(
-                    "INSERT INTO records(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (title, body, created_at, now),
-                )
-                rid = cur.lastrowid
-            for attr_id in attribute_ids:
-                cur.execute(
-                    "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
-                    (rid, attr_id),
-                )
-            self.conn.commit()
+            with self.conn:
+                cur = self.conn.cursor()
+                if record_id:
+                    cur.execute(
+                        "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
+                        (title, body, now, record_id),
+                    )
+                    rid = record_id
+                    cur.execute("DELETE FROM record_attributes WHERE record_id = ?", (rid,))
+                else:
+                    cur.execute(
+                        "INSERT INTO records(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                        (title, body, created_at, now),
+                    )
+                    rid = cur.lastrowid
+                for attr_id in attribute_ids:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
+                        (rid, attr_id),
+                    )
             self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return rid
         except Exception:
-            self.conn.rollback()
             raise
 
 
