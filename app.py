@@ -44,7 +44,7 @@ else:
 
 
 APP_DIR = Path(__file__).parent
-DEFAULT_EXPORT_PATH = r"D:\기록 프로젝트"
+DEFAULT_EXPORT_PATH = r"C:\record_archive"
 CONFIG_PATH = APP_DIR / "config.json"
 SAVE_LOG_PATH = APP_DIR / "save_audit.log"
 
