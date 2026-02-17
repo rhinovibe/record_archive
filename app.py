@@ -84,9 +84,13 @@ class RecordSummary:
 
 class RecordDB:
     def __init__(self, db_path: Path):
+        self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=FULL")
+        self.conn.execute("PRAGMA busy_timeout=10000")
         self._init_schema()
 
     def _init_schema(self):
@@ -157,26 +161,28 @@ class RecordDB:
 
     def save_record(self, title: str, body: str, created_at: str, attribute_ids: list[int], record_id=None):
         now = datetime.now().isoformat(timespec="seconds")
-        cur = self.conn.cursor()
-        if record_id:
-            cur.execute(
-                "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
-                (title, body, now, record_id),
-            )
-            rid = record_id
-            cur.execute("DELETE FROM record_attributes WHERE record_id = ?", (rid,))
-        else:
-            cur.execute(
-                "INSERT INTO records(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (title, body, created_at, now),
-            )
-            rid = cur.lastrowid
-        for attr_id in attribute_ids:
-            cur.execute(
-                "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
-                (rid, attr_id),
-            )
-        self.conn.commit()
+        with self.conn:
+            cur = self.conn.cursor()
+            if record_id:
+                cur.execute(
+                    "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
+                    (title, body, now, record_id),
+                )
+                rid = record_id
+                cur.execute("DELETE FROM record_attributes WHERE record_id = ?", (rid,))
+            else:
+                cur.execute(
+                    "INSERT INTO records(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (title, body, created_at, now),
+                )
+                rid = cur.lastrowid
+            for attr_id in attribute_ids:
+                cur.execute(
+                    "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
+                    (rid, attr_id),
+                )
+
+        self.conn.execute("PRAGMA wal_checkpoint(FULL)")
         return rid
 
     def list_records(self):
@@ -581,11 +587,23 @@ class RecordApp:
             if existing:
                 created_at = existing["created_at"]
 
-        rid = self.db.save_record(title, body, created_at, attribute_ids, self.current_record_id)
+        try:
+            rid = self.db.save_record(title, body, created_at, attribute_ids, self.current_record_id)
+            persisted, _ = self.db.get_record(rid)
+            if not persisted:
+                raise RuntimeError("저장 직후 DB에서 레코드를 다시 찾지 못했습니다.")
+        except Exception as exc:
+            messagebox.showerror(
+                "저장 실패",
+                f"DB 저장 실패: {exc}\n\n현재 DB 경로: {self.db.db_path}",
+            )
+            self.status.configure(text=f"저장 실패 | DB 경로: {self.db.db_path} | 오류: {exc}")
+            return
+
         self.current_record_id = rid
         self.refresh_records()
         self._export_to_word(title, body, created_at)
-        messagebox.showinfo("완료", "기록이 저장되었습니다.")
+        messagebox.showinfo("완료", f"기록이 저장되었습니다.\nDB: {self.db.db_path}")
 
     def _export_to_word(self, title: str, body: str, created_at: str):
         if Document is None:
