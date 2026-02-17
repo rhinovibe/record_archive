@@ -20,6 +20,7 @@ from tkinter import (
     Label,
     LabelFrame,
     Listbox,
+    EXTENDED,
     Menu,
     Message,
     Scrollbar,
@@ -301,21 +302,21 @@ class RecordApp:
         attr.pack(fill=X, pady=8)
 
         Label(attr, text="1차 Attribute (필수)").grid(row=0, column=0, sticky="w", padx=5)
-        self.primary_list = Listbox(attr, height=4, exportselection=False)
+        self.primary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
         self.primary_list.grid(row=1, column=0, padx=5)
         self.primary_list.bind("<<ListboxSelect>>", self.on_primary_change)
         self.primary_new = Entry(attr)
         self.primary_new.grid(row=2, column=0, padx=5, pady=4)
 
         Label(attr, text="2차 Attribute (선택)").grid(row=0, column=1, sticky="w", padx=5)
-        self.secondary_list = Listbox(attr, height=4, exportselection=False)
+        self.secondary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
         self.secondary_list.grid(row=1, column=1, padx=5)
         self.secondary_list.bind("<<ListboxSelect>>", self.on_secondary_change)
         self.secondary_new = Entry(attr)
         self.secondary_new.grid(row=2, column=1, padx=5, pady=4)
 
         Label(attr, text="3차 Attribute (선택)").grid(row=0, column=2, sticky="w", padx=5)
-        self.tertiary_list = Listbox(attr, height=4, exportselection=False)
+        self.tertiary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
         self.tertiary_list.grid(row=1, column=2, padx=5)
         self.tertiary_new = Entry(attr)
         self.tertiary_new.grid(row=2, column=2, padx=5, pady=4)
@@ -348,25 +349,43 @@ class RecordApp:
         self.tertiary_list.delete(0, END)
         self.tertiary_map.clear()
 
-        sel = self.primary_list.curselection()
-        if not sel:
+        selections = self.primary_list.curselection()
+        if not selections:
             return
-        pid = self.primary_map.get(sel[0])
-        for idx, row in enumerate(self.db.get_attributes_by_parent(pid)):
-            self.secondary_list.insert(END, row["name"])
-            self.secondary_map[idx] = row["id"]
+
+        idx = 0
+        seen = set()
+        for selected_idx in selections:
+            pid = self.primary_map.get(selected_idx)
+            primary_name = self.primary_list.get(selected_idx)
+            for row in self.db.get_attributes_by_parent(pid):
+                if row["id"] in seen:
+                    continue
+                seen.add(row["id"])
+                self.secondary_list.insert(END, f"{primary_name} > {row['name']}")
+                self.secondary_map[idx] = row["id"]
+                idx += 1
 
     def on_secondary_change(self, _event=None):
         self.tertiary_list.delete(0, END)
         self.tertiary_map.clear()
 
-        sel = self.secondary_list.curselection()
-        if not sel:
+        selections = self.secondary_list.curselection()
+        if not selections:
             return
-        sid = self.secondary_map.get(sel[0])
-        for idx, row in enumerate(self.db.get_attributes_by_parent(sid)):
-            self.tertiary_list.insert(END, row["name"])
-            self.tertiary_map[idx] = row["id"]
+
+        idx = 0
+        seen = set()
+        for selected_idx in selections:
+            sid = self.secondary_map.get(selected_idx)
+            secondary_label = self.secondary_list.get(selected_idx)
+            for row in self.db.get_attributes_by_parent(sid):
+                if row["id"] in seen:
+                    continue
+                seen.add(row["id"])
+                self.tertiary_list.insert(END, f"{secondary_label} > {row['name']}")
+                self.tertiary_map[idx] = row["id"]
+                idx += 1
 
     def refresh_records(self):
         self._render_record_list(self.db.list_records())
@@ -424,72 +443,78 @@ class RecordApp:
         self.secondary_list.selection_clear(0, END)
         self.tertiary_list.selection_clear(0, END)
 
-        level1 = next((a for a in attrs if a["level"] == 1), None)
-        level2 = next((a for a in attrs if a["level"] == 2), None)
-        level3 = next((a for a in attrs if a["level"] == 3), None)
+        level1_ids = {a["id"] for a in attrs if a["level"] == 1}
+        level2_ids = {a["id"] for a in attrs if a["level"] == 2}
+        level3_ids = {a["id"] for a in attrs if a["level"] == 3}
 
-        if level1:
+        if level1_ids:
             for idx, aid in self.primary_map.items():
-                if aid == level1["id"]:
+                if aid in level1_ids:
                     self.primary_list.selection_set(idx)
-                    break
             self.on_primary_change()
-        if level2:
+        if level2_ids:
             for idx, aid in self.secondary_map.items():
-                if aid == level2["id"]:
+                if aid in level2_ids:
                     self.secondary_list.selection_set(idx)
-                    break
             self.on_secondary_change()
-        if level3:
+        if level3_ids:
             for idx, aid in self.tertiary_map.items():
-                if aid == level3["id"]:
+                if aid in level3_ids:
                     self.tertiary_list.selection_set(idx)
-                    break
 
     def new_record(self):
         self.current_record_id = None
         self.title_entry.delete(0, END)
         self.body_text.delete("1.0", END)
+        self.primary_list.selection_clear(0, END)
+        self.secondary_list.delete(0, END)
+        self.secondary_list.selection_clear(0, END)
+        self.tertiary_list.delete(0, END)
+        self.tertiary_list.selection_clear(0, END)
         self.primary_new.delete(0, END)
         self.secondary_new.delete(0, END)
         self.tertiary_new.delete(0, END)
 
+    @staticmethod
+    def _parse_new_attribute_names(raw: str):
+        return [name.strip() for name in raw.split(",") if name.strip()]
+
     def _resolve_attribute_ids(self):
         selected_primary = self.primary_list.curselection()
-        primary_name = self.primary_new.get().strip()
-        if not selected_primary and not primary_name:
+        primary_names = self._parse_new_attribute_names(self.primary_new.get().strip())
+        if not selected_primary and not primary_names:
             raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
 
-        if primary_name:
-            p_id = self.db.find_or_create_attribute(primary_name, 1, None)
+        primary_ids = {self.primary_map[idx] for idx in selected_primary}
+        for primary_name in primary_names:
+            primary_ids.add(self.db.find_or_create_attribute(primary_name, 1, None))
+
+        if primary_names:
             self.populate_primary_attributes()
-        else:
-            p_id = self.primary_map[selected_primary[0]]
 
         selected_secondary = self.secondary_list.curselection()
-        secondary_name = self.secondary_new.get().strip()
-        s_id = None
-        if secondary_name:
-            s_id = self.db.find_or_create_attribute(secondary_name, 2, p_id)
+        secondary_names = self._parse_new_attribute_names(self.secondary_new.get().strip())
+        secondary_ids = {self.secondary_map[idx] for idx in selected_secondary}
+
+        for secondary_name in secondary_names:
+            for p_id in primary_ids:
+                secondary_ids.add(self.db.find_or_create_attribute(secondary_name, 2, p_id))
+
+        if secondary_names:
             self.on_primary_change()
-        elif selected_secondary:
-            s_id = self.secondary_map[selected_secondary[0]]
 
         selected_tertiary = self.tertiary_list.curselection()
-        tertiary_name = self.tertiary_new.get().strip()
-        t_id = None
-        if tertiary_name and s_id:
-            t_id = self.db.find_or_create_attribute(tertiary_name, 3, s_id)
-            self.on_secondary_change()
-        elif selected_tertiary:
-            t_id = self.tertiary_map[selected_tertiary[0]]
+        tertiary_names = self._parse_new_attribute_names(self.tertiary_new.get().strip())
+        tertiary_ids = {self.tertiary_map[idx] for idx in selected_tertiary}
 
-        ids = [p_id]
-        if s_id:
-            ids.append(s_id)
-        if t_id:
-            ids.append(t_id)
-        return ids
+        for tertiary_name in tertiary_names:
+            for s_id in secondary_ids:
+                tertiary_ids.add(self.db.find_or_create_attribute(tertiary_name, 3, s_id))
+
+        if tertiary_names:
+            self.on_secondary_change()
+
+        return list(primary_ids | secondary_ids | tertiary_ids)
 
     def save_record(self):
         title = self.title_entry.get().strip()
