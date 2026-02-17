@@ -107,9 +107,9 @@ class RecordSummary:
 
 class RecordDB:
     def __init__(self, db_path: Path):
-        self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path, timeout=10)
+        self.db_path = db_path.resolve()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
@@ -205,7 +205,8 @@ class RecordDB:
                     (rid, attr_id),
                 )
 
-        self.conn.execute("PRAGMA wal_checkpoint(FULL)")
+        self.conn.commit()
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return rid
 
     def verify_record_persisted(self, record_id: int) -> bool:
@@ -216,6 +217,15 @@ class RecordDB:
             return row is not None
         finally:
             check_conn.close()
+
+    def verify_disk_artifacts(self) -> tuple[bool, int]:
+        db_file = Path(self.db_path)
+        if not db_file.exists():
+            return False, 0
+        try:
+            return True, db_file.stat().st_size
+        except Exception:
+            return True, 0
 
     def list_records(self):
         rows = self.conn.execute(
@@ -712,9 +722,12 @@ class RecordApp:
             if not self.db.verify_record_persisted(rid):
                 raise RuntimeError("새 DB 연결에서 저장된 레코드가 확인되지 않았습니다.")
 
+            file_exists, file_size = self.db.verify_disk_artifacts()
             db_file = Path(self.db.db_path)
-            if not db_file.exists():
+            if not file_exists:
                 raise RuntimeError(f"DB 파일이 생성되지 않았습니다: {db_file}")
+            if file_size <= 0:
+                raise RuntimeError(f"DB 파일 크기가 비정상입니다: {db_file} (size={file_size})")
 
             if os.name == "nt":
                 expected_root = Path(DEFAULT_EXPORT_PATH)
@@ -741,12 +754,13 @@ class RecordApp:
         self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
         self._show_forced_popup(
             "저장 완료",
-            f"기록이 저장되었습니다.\n\n레코드 ID: {rid}\nDB 저장 위치:\n{db_location}",
+            f"기록이 저장되었습니다.\n\n레코드 ID: {rid}\nDB 저장 위치:\n{db_location}\nDB 파일 크기: {Path(self.db.db_path).stat().st_size} bytes",
         )
 
         try:
-            SAVE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with SAVE_LOG_PATH.open("a", encoding="utf-8") as fp:
+            db_log_path = Path(self.db.db_path).parent / "save_audit.log"
+            db_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with db_log_path.open("a", encoding="utf-8") as fp:
                 fp.write(f"{datetime.now().isoformat(timespec='seconds')} | rid={rid} | db={db_location}\n")
         except Exception:
             pass
