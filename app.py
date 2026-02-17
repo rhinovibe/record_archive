@@ -744,10 +744,26 @@ class RecordApp:
             self.current_record_id = rid
             self.refresh_records()
             db_location = str(Path(self.db.db_path).resolve())
-            self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
+
+            word_ok, word_message = self._export_to_word(title, body, created_at)
+            if word_ok:
+                self.status.configure(
+                    text=f"저장 완료 | DB 파일: {db_location} | 워드 파일: {word_message}"
+                )
+            else:
+                self.status.configure(
+                    text=f"저장 부분 완료 | DB 파일: {db_location} | 워드 저장 실패: {word_message}"
+                )
+
             self._show_forced_popup(
                 "저장 완료",
-                f"기록이 저장되었습니다.\n\n레코드 ID: {rid}\nDB 저장 위치:\n{db_location}\nDB 파일 크기: {Path(self.db.db_path).stat().st_size} bytes",
+                (
+                    f"기록이 저장되었습니다.\n\n"
+                    f"레코드 ID: {rid}\n"
+                    f"DB 저장 위치:\n{db_location}\n"
+                    f"DB 파일 크기: {Path(self.db.db_path).stat().st_size} bytes\n\n"
+                    f"워드 저장 결과: {word_message}"
+                ),
             )
 
             try:
@@ -758,8 +774,6 @@ class RecordApp:
             except Exception:
                 pass
 
-            self._export_to_word(title, body, created_at)
-
         except Exception as exc:
             self._show_forced_popup(
                 "저장 실패",
@@ -769,23 +783,23 @@ class RecordApp:
             return
 
 
-    def _export_to_word(self, title: str, body: str, created_at: str):
+    def _export_to_word(self, title: str, body: str, created_at: str) -> tuple[bool, str]:
         if Document is None:
-            self.status.configure(text="python-docx가 없어 워드 저장을 건너뜀")
-            return
+            return False, "python-docx 모듈을 찾을 수 없습니다. build_exe.bat로 다시 빌드해 주세요."
         try:
             date_folder = created_at[:10]
             target_dir = Path(self.export_path) / date_folder
             target_dir.mkdir(parents=True, exist_ok=True)
             filename = normalize_filename(f"{date_folder}: {title}") + ".docx"
+            output_path = target_dir / filename
             doc = Document()
             doc.add_heading(title, level=1)
             doc.add_paragraph(f"기록일시: {created_at}")
             doc.add_paragraph(body)
-            doc.save(target_dir / filename)
-            self.status.configure(text=f"워드 저장 완료: {target_dir / filename}")
+            doc.save(output_path)
+            return True, str(output_path)
         except Exception as exc:
-            self.status.configure(text=f"워드 저장 실패(기록 본문 저장은 완료): {exc}")
+            return False, str(exc)
 
 
 def main():
