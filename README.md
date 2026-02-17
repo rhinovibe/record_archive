@@ -62,5 +62,8 @@ pyinstaller --noconfirm --onefile --windowed --name record_archive app.py
 
 ## 저장 데이터
 
-- 로컬 DB: `D:\기록 프로젝트\records.db` (SQLite, 고정 경로)
+- 로컬 DB:
+  - Windows: `D:\기록 프로젝트\records.db` (우선 사용)
+  - 비-Windows 개발 환경: `<프로젝트 폴더>/records.db`
+  - 구버전 `<프로젝트 폴더>/records.db`가 있으면 Windows 실행 시 `D:\기록 프로젝트\records.db`로 자동 복사
 - 설정 파일: `config.json` (Word 저장 경로)

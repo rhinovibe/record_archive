@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -42,8 +44,29 @@ else:
 
 APP_DIR = Path(__file__).parent
 DEFAULT_EXPORT_PATH = r"D:\기록 프로젝트"
-DB_PATH = Path(DEFAULT_EXPORT_PATH) / "records.db"
 CONFIG_PATH = APP_DIR / "config.json"
+
+
+def resolve_db_path() -> Path:
+    preferred = Path(DEFAULT_EXPORT_PATH) / "records.db"
+    legacy = APP_DIR / "records.db"
+
+    # Windows 배포 대상: D:\기록 프로젝트\records.db를 우선 사용
+    if os.name == "nt":
+        try:
+            preferred.parent.mkdir(parents=True, exist_ok=True)
+            if not preferred.exists() and legacy.exists():
+                shutil.copy2(legacy, preferred)
+            return preferred
+        except Exception:
+            # 드라이브 접근 실패 시 레거시 경로로 안전하게 폴백
+            return legacy
+
+    # 비-Windows 개발 환경에서는 저장소 로컬 DB 사용
+    return legacy
+
+
+DB_PATH = resolve_db_path()
 
 
 def normalize_filename(name: str) -> str:
@@ -339,7 +362,11 @@ class RecordApp:
         self.tertiary_new = Entry(attr)
         self.tertiary_new.grid(row=2, column=2, padx=5, pady=4)
 
-        self.status = Message(right, width=700, text=f"워드 저장 경로: {self.export_path}")
+        self.status = Message(
+            right,
+            width=700,
+            text=f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}",
+        )
         self.status.pack(fill=X)
 
         self.primary_map = {}
@@ -352,7 +379,7 @@ class RecordApp:
         if selected:
             self.export_path = selected
             self._save_export_path()
-            self.status.configure(text=f"워드 저장 경로: {self.export_path}")
+            self.status.configure(text=f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}")
 
     def populate_primary_attributes(self):
         self.primary_list.delete(0, END)
