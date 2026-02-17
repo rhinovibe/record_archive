@@ -56,7 +56,7 @@ build_exe.bat
 run_app.bat
 ```
 
-- `run_app.bat`은 내부에서 `build_exe.bat`를 먼저 호출한 뒤 최신 EXE를 실행합니다.
+- `run_app.bat`은 내부에서 `build_exe.bat --no-run`으로 먼저 빌드만 수행한 뒤, 최신 EXE를 **한 번만** 실행합니다.
 
 ### 3) 수동 빌드
 
