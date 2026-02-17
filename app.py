@@ -208,6 +208,15 @@ class RecordDB:
         self.conn.execute("PRAGMA wal_checkpoint(FULL)")
         return rid
 
+    def verify_record_persisted(self, record_id: int) -> bool:
+        """새 연결로 다시 읽어서 실제 디스크 반영 여부를 확인한다."""
+        check_conn = sqlite3.connect(self.db_path, timeout=5)
+        try:
+            row = check_conn.execute("SELECT id FROM records WHERE id = ?", (record_id,)).fetchone()
+            return row is not None
+        finally:
+            check_conn.close()
+
     def list_records(self):
         rows = self.conn.execute(
             "SELECT id, title, created_at FROM records ORDER BY created_at DESC"
@@ -700,6 +709,24 @@ class RecordApp:
             persisted, _ = self.db.get_record(rid)
             if not persisted:
                 raise RuntimeError("저장 직후 DB에서 레코드를 다시 찾지 못했습니다.")
+            if not self.db.verify_record_persisted(rid):
+                raise RuntimeError("새 DB 연결에서 저장된 레코드가 확인되지 않았습니다.")
+
+            db_file = Path(self.db.db_path)
+            if not db_file.exists():
+                raise RuntimeError(f"DB 파일이 생성되지 않았습니다: {db_file}")
+
+            if os.name == "nt":
+                expected_root = Path(DEFAULT_EXPORT_PATH)
+                try:
+                    db_parent = Path(self.db.db_path).parent.resolve()
+                    expected_parent = expected_root.resolve()
+                    if db_parent != expected_parent:
+                        raise RuntimeError(
+                            f"DB 경로가 예상과 다릅니다. 현재: {db_parent}, 예상: {expected_parent}"
+                        )
+                except Exception as path_exc:
+                    raise RuntimeError(f"DB 경로 확인 실패: {path_exc}") from path_exc
         except Exception as exc:
             self._show_forced_popup(
                 "저장 실패",
@@ -714,7 +741,7 @@ class RecordApp:
         self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
         self._show_forced_popup(
             "저장 완료",
-            f"기록이 저장되었습니다.\n\nDB 저장 위치:\n{db_location}",
+            f"기록이 저장되었습니다.\n\n레코드 ID: {rid}\nDB 저장 위치:\n{db_location}",
         )
 
         try:
