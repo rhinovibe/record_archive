@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+records.db
+config.json
+build/
+dist/
+*.spec
+
+save_audit.log
