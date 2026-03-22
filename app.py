@@ -49,28 +49,49 @@ CONFIG_PATH = APP_DIR / "config.json"
 SAVE_LOG_PATH = APP_DIR / "save_audit.log"
 
 
-def resolve_db_path() -> Path:
+def _can_open_sqlite(db_file: Path) -> bool:
+    """DB 파일 경로가 실제로 쓰기 가능한지 확인한다."""
+    conn = None
+    try:
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_file, timeout=3)
+        conn.execute("PRAGMA user_version")
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def resolve_db_path() -> tuple[Path, str | None]:
     preferred = Path(DEFAULT_EXPORT_PATH) / "records.db"
     legacy = APP_DIR / "records.db"
-    home_fallback = Path.home() / "record_archive" / "records.db"
 
-    # Windows에서는 D: 우선, 실패 시 사용자 홈 경로로 폴백
+    # Windows에서는 요청한 경로(D:\기록 프로젝트)를 고정으로 사용한다.
     if os.name == "nt":
-        for candidate in (preferred, home_fallback, legacy):
-            try:
-                candidate.parent.mkdir(parents=True, exist_ok=True)
-                if candidate == preferred and not candidate.exists() and legacy.exists():
-                    shutil.copy2(legacy, candidate)
-                return candidate
-            except Exception:
-                continue
-        return legacy
+        try:
+            preferred.parent.mkdir(parents=True, exist_ok=True)
+            if not preferred.exists() and legacy.exists():
+                shutil.copy2(legacy, preferred)
+            if _can_open_sqlite(preferred):
+                return preferred, None
+            return preferred, (
+                f"지정된 DB 경로({preferred})에 쓰기/생성이 불가능합니다. "
+                "관리자 권한으로 실행하거나 폴더 권한을 확인해 주세요."
+            )
+        except Exception as exc:
+            return preferred, (
+                f"지정된 DB 경로({preferred}) 초기화 실패: {exc}. "
+                "관리자 권한으로 실행하거나 폴더 권한을 확인해 주세요."
+            )
 
     # 비-Windows 개발 환경에서는 저장소 로컬 DB 사용
-    return legacy
+    return legacy, None
 
 
-DB_PATH = resolve_db_path()
+DB_PATH, DB_PATH_WARNING = resolve_db_path()
 
 
 def normalize_filename(name: str) -> str:
@@ -86,9 +107,9 @@ class RecordSummary:
 
 class RecordDB:
     def __init__(self, db_path: Path):
-        self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path, timeout=10)
+        self.db_path = db_path.resolve()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.db_path, timeout=10)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
@@ -163,29 +184,55 @@ class RecordDB:
 
     def save_record(self, title: str, body: str, created_at: str, attribute_ids: list[int], record_id=None):
         now = datetime.now().isoformat(timespec="seconds")
-        with self.conn:
-            cur = self.conn.cursor()
-            if record_id:
-                cur.execute(
-                    "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
-                    (title, body, now, record_id),
-                )
-                rid = record_id
-                cur.execute("DELETE FROM record_attributes WHERE record_id = ?", (rid,))
-            else:
-                cur.execute(
-                    "INSERT INTO records(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (title, body, created_at, now),
-                )
-                rid = cur.lastrowid
-            for attr_id in attribute_ids:
-                cur.execute(
-                    "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
-                    (rid, attr_id),
-                )
+        try:
+            with self.conn:
+                cur = self.conn.cursor()
+                if record_id:
+                    cur.execute(
+                        "UPDATE records SET title=?, body=?, updated_at=? WHERE id=?",
+                        (title, body, now, record_id),
+                    )
+                    rid = record_id
+                    cur.execute("DELETE FROM record_attributes WHERE record_id = ?", (rid,))
+                else:
+                    cur.execute(
+                        "INSERT INTO records(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                        (title, body, created_at, now),
+                    )
+                    rid = cur.lastrowid
+                for attr_id in attribute_ids:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO record_attributes(record_id, attribute_id) VALUES (?, ?)",
+                        (rid, attr_id),
+                    )
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return rid
+        except Exception:
+            raise
 
-        self.conn.execute("PRAGMA wal_checkpoint(FULL)")
-        return rid
+    def delete_record(self, record_id: int):
+        with self.conn:
+            self.conn.execute("DELETE FROM record_attributes WHERE record_id = ?", (record_id,))
+            self.conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
+
+
+    def verify_record_persisted(self, record_id: int) -> bool:
+        """새 연결로 다시 읽어서 실제 디스크 반영 여부를 확인한다."""
+        check_conn = sqlite3.connect(self.db_path, timeout=5)
+        try:
+            row = check_conn.execute("SELECT id FROM records WHERE id = ?", (record_id,)).fetchone()
+            return row is not None
+        finally:
+            check_conn.close()
+
+    def verify_disk_artifacts(self) -> tuple[bool, int]:
+        db_file = Path(self.db_path)
+        if not db_file.exists():
+            return False, 0
+        try:
+            return True, db_file.stat().st_size
+        except Exception:
+            return True, 0
 
     def list_records(self):
         rows = self.conn.execute(
@@ -273,9 +320,15 @@ class RecordApp:
         self.root = root
         self.root.title("기록 관리 프로그램")
         self.root.geometry("1100x700")
-        self.db = RecordDB(DB_PATH)
+        self.db = None
+        self.db_init_error = None
+        try:
+            self.db = RecordDB(DB_PATH)
+        except Exception as exc:
+            self.db_init_error = str(exc)
         self.export_path = self._load_export_path()
         self.current_record_id = None
+        self.attribute_levels = []
 
         self.search_query = StringVar()
         self.search_attr = BooleanVar(value=True)
@@ -284,7 +337,42 @@ class RecordApp:
         self.search_body = BooleanVar(value=True)
 
         self._build_ui()
+        if DB_PATH_WARNING:
+            self._show_forced_popup("DB 경로 안내", DB_PATH_WARNING)
+        if self.db_init_error:
+            self._show_forced_popup(
+                "DB 초기화 실패",
+                f"DB를 열 수 없습니다.\n경로: {DB_PATH}\n오류: {self.db_init_error}",
+            )
+        self._ensure_db_file_visible()
         self.refresh_records()
+
+
+    def _ensure_db_file_visible(self):
+        if not self._require_db():
+            return
+        db_path = Path(self.db.db_path)
+        if db_path.exists():
+            return
+
+        self.status.configure(text=f"DB 파일 생성 실패 | DB 경로: {db_path}")
+        self._show_forced_popup(
+            "DB 파일 확인 필요",
+            "DB 파일이 생성되지 않았습니다.\n"
+            f"현재 DB 경로: {db_path}\n\n"
+            "쓰기 권한이 있는지 확인해 주세요.",
+        )
+
+    def _require_db(self) -> bool:
+        if self.db is not None:
+            return True
+        detail = self.db_init_error or "알 수 없는 오류"
+        self.status.configure(text=f"DB 비활성화 | 경로: {DB_PATH} | 오류: {detail}")
+        self._show_forced_popup(
+            "DB 사용 불가",
+            f"DB를 사용할 수 없습니다.\n경로: {DB_PATH}\n오류: {detail}",
+        )
+        return False
 
     def _load_export_path(self) -> str:
         if CONFIG_PATH.exists():
@@ -340,6 +428,7 @@ class RecordApp:
         Button(header, text="새 기록", command=self.new_record).pack(side=LEFT, padx=4)
         Button(header, text="저장", command=self.save_record).pack(side=LEFT, padx=4)
         Button(header, text="선택 기록 편집", command=self.load_selected_for_edit).pack(side=LEFT, padx=4)
+        Button(header, text="선택 기록 삭제", command=self.delete_selected_record).pack(side=LEFT, padx=4)
 
         Label(right, text="제목").pack(anchor="w")
         self.title_entry = Entry(right)
@@ -351,38 +440,25 @@ class RecordApp:
 
         attr = LabelFrame(right, text="Attribute 지정")
         attr.pack(fill=X, pady=8)
+        self.attr_frame = attr
+        self.add_level_button = Button(attr, text="+ 차수 추가", command=self.add_attribute_level)
 
-        Label(attr, text="1차 Attribute (필수)").grid(row=0, column=0, sticky="w", padx=5)
-        self.primary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
-        self.primary_list.grid(row=1, column=0, padx=5)
-        self.primary_list.bind("<<ListboxSelect>>", self.on_primary_change)
-        self.primary_new = Entry(attr)
-        self.primary_new.grid(row=2, column=0, padx=5, pady=4)
-
-        Label(attr, text="2차 Attribute (선택)").grid(row=0, column=1, sticky="w", padx=5)
-        self.secondary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
-        self.secondary_list.grid(row=1, column=1, padx=5)
-        self.secondary_list.bind("<<ListboxSelect>>", self.on_secondary_change)
-        self.secondary_new = Entry(attr)
-        self.secondary_new.grid(row=2, column=1, padx=5, pady=4)
-
-        Label(attr, text="3차 Attribute (선택)").grid(row=0, column=2, sticky="w", padx=5)
-        self.tertiary_list = Listbox(attr, height=6, exportselection=False, selectmode=EXTENDED)
-        self.tertiary_list.grid(row=1, column=2, padx=5)
-        self.tertiary_new = Entry(attr)
-        self.tertiary_new.grid(row=2, column=2, padx=5, pady=4)
+        self._create_attribute_level_ui(1)
+        self._create_attribute_level_ui(2)
+        self._create_attribute_level_ui(3)
+        self._render_add_level_button()
 
         self.status = Message(
             right,
             width=700,
-            text=f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}",
+            text=(
+                f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}"
+                + (f" | {DB_PATH_WARNING}" if DB_PATH_WARNING else "")
+            ),
         )
         self.status.pack(fill=X)
 
-        self.primary_map = {}
-        self.secondary_map = {}
-        self.tertiary_map = {}
-        self.populate_primary_attributes()
+        self.populate_root_attributes()
 
     def _show_forced_popup(self, title: str, content: str):
         popup = Toplevel(self.root)
@@ -397,66 +473,91 @@ class RecordApp:
         popup.lift()
         popup.attributes("-topmost", True)
         popup.after(300, lambda: popup.attributes("-topmost", False))
+        self.root.wait_window(popup)
 
     def change_export_path(self):
         selected = filedialog.askdirectory(title="워드 저장 경로 선택")
         if selected:
             self.export_path = selected
             self._save_export_path()
-            self.status.configure(text=f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}")
+            self.status.configure(
+                text=(
+                    f"DB 경로: {DB_PATH} | 워드 저장 경로: {self.export_path}"
+                    + (f" | {DB_PATH_WARNING}" if DB_PATH_WARNING else "")
+                )
+            )
 
-    def populate_primary_attributes(self):
-        self.primary_list.delete(0, END)
-        self.primary_map.clear()
+    def _create_attribute_level_ui(self, level: int):
+        col = level - 1
+        required = " (필수)" if level == 1 else " (선택)"
+        label = Label(self.attr_frame, text=f"{level}차 Attribute{required}")
+        label.grid(row=0, column=col, sticky="w", padx=5)
+
+        listbox = Listbox(self.attr_frame, height=6, exportselection=False, selectmode=EXTENDED)
+        listbox.grid(row=1, column=col, padx=5)
+        listbox.bind("<<ListboxSelect>>", lambda _event, lv=level: self.on_attribute_level_change(lv))
+
+        entry = Entry(self.attr_frame)
+        entry.grid(row=2, column=col, padx=5, pady=4)
+
+        self.attribute_levels.append({"level": level, "label": label, "listbox": listbox, "entry": entry, "map": {}})
+
+    def _render_add_level_button(self):
+        self.add_level_button.grid(row=3, column=0, columnspan=max(1, len(self.attribute_levels)), pady=(2, 4), sticky="w")
+
+    def add_attribute_level(self):
+        self._create_attribute_level_ui(len(self.attribute_levels) + 1)
+        self._render_add_level_button()
+
+    def _get_level_ui(self, level: int):
+        return self.attribute_levels[level - 1]
+
+    def _selected_ids_for_level(self, level: int) -> set[int]:
+        level_ui = self._get_level_ui(level)
+        return {level_ui["map"][idx] for idx in level_ui["listbox"].curselection() if idx in level_ui["map"]}
+
+    def _clear_levels_from(self, start_level: int):
+        for level in range(start_level, len(self.attribute_levels) + 1):
+            level_ui = self._get_level_ui(level)
+            level_ui["listbox"].delete(0, END)
+            level_ui["map"].clear()
+
+    def populate_root_attributes(self):
+        if not self._require_db():
+            return
+        level1 = self._get_level_ui(1)
+        level1["listbox"].delete(0, END)
+        level1["map"].clear()
         for idx, row in enumerate(self.db.get_attributes_by_parent(None)):
-            self.primary_list.insert(END, row["name"])
-            self.primary_map[idx] = row["id"]
+            level1["listbox"].insert(END, row["name"])
+            level1["map"][idx] = row["id"]
+        self._clear_levels_from(2)
 
-    def on_primary_change(self, _event=None):
-        self.secondary_list.delete(0, END)
-        self.secondary_map.clear()
-        self.tertiary_list.delete(0, END)
-        self.tertiary_map.clear()
-
-        selections = self.primary_list.curselection()
-        if not selections:
+    def on_attribute_level_change(self, level: int):
+        self._clear_levels_from(level + 1)
+        if level >= len(self.attribute_levels):
             return
 
-        idx = 0
+        parent_ids = self._selected_ids_for_level(level)
+        if not parent_ids:
+            return
+
+        next_level = self._get_level_ui(level + 1)
         seen = set()
-        for selected_idx in selections:
-            pid = self.primary_map.get(selected_idx)
-            primary_name = self.primary_list.get(selected_idx)
-            for row in self.db.get_attributes_by_parent(pid):
+        idx = 0
+        for parent_id in parent_ids:
+            for row in self.db.get_attributes_by_parent(parent_id):
                 if row["id"] in seen:
                     continue
                 seen.add(row["id"])
-                self.secondary_list.insert(END, f"{primary_name} > {row['name']}")
-                self.secondary_map[idx] = row["id"]
-                idx += 1
-
-    def on_secondary_change(self, _event=None):
-        self.tertiary_list.delete(0, END)
-        self.tertiary_map.clear()
-
-        selections = self.secondary_list.curselection()
-        if not selections:
-            return
-
-        idx = 0
-        seen = set()
-        for selected_idx in selections:
-            sid = self.secondary_map.get(selected_idx)
-            secondary_label = self.secondary_list.get(selected_idx)
-            for row in self.db.get_attributes_by_parent(sid):
-                if row["id"] in seen:
-                    continue
-                seen.add(row["id"])
-                self.tertiary_list.insert(END, f"{secondary_label} > {row['name']}")
-                self.tertiary_map[idx] = row["id"]
+                next_level["listbox"].insert(END, row["name"])
+                next_level["map"][idx] = row["id"]
                 idx += 1
 
     def refresh_records(self):
+        if not self._require_db():
+            self._render_record_list([])
+            return
         self._render_record_list(self.db.list_records())
 
     def _render_record_list(self, records: list[RecordSummary]):
@@ -467,6 +568,10 @@ class RecordApp:
             self._record_index[i] = rec.record_id
 
     def perform_search(self):
+        if not self._require_db():
+            self._render_record_list([])
+            return
+
         any_selected = any(
             [self.search_attr.get(), self.search_date.get(), self.search_title.get(), self.search_body.get()]
         )
@@ -481,6 +586,9 @@ class RecordApp:
         self._render_record_list(records)
 
     def on_select_record(self, _event=None):
+        if not self._require_db():
+            return
+
         sel = self.record_list.curselection()
         if not sel:
             return
@@ -494,6 +602,9 @@ class RecordApp:
         )
 
     def load_selected_for_edit(self):
+        if not self._require_db():
+            return
+
         sel = self.record_list.curselection()
         if not sel:
             messagebox.showwarning("안내", "편집할 기록을 선택하세요.")
@@ -508,93 +619,131 @@ class RecordApp:
         self.body_text.delete("1.0", END)
         self.body_text.insert("1.0", row["body"])
 
-        self.primary_list.selection_clear(0, END)
-        self.secondary_list.selection_clear(0, END)
-        self.tertiary_list.selection_clear(0, END)
+        max_level = max([a["level"] for a in attrs], default=1)
+        while len(self.attribute_levels) < max_level:
+            self.add_attribute_level()
 
-        level1_ids = {a["id"] for a in attrs if a["level"] == 1}
-        level2_ids = {a["id"] for a in attrs if a["level"] == 2}
-        level3_ids = {a["id"] for a in attrs if a["level"] == 3}
+        self.populate_root_attributes()
+        for level_ui in self.attribute_levels:
+            level_ui["listbox"].selection_clear(0, END)
+            level_ui["entry"].delete(0, END)
 
-        if level1_ids:
-            for idx, aid in self.primary_map.items():
-                if aid in level1_ids:
-                    self.primary_list.selection_set(idx)
-            self.on_primary_change()
-        if level2_ids:
-            for idx, aid in self.secondary_map.items():
-                if aid in level2_ids:
-                    self.secondary_list.selection_set(idx)
-            self.on_secondary_change()
-        if level3_ids:
-            for idx, aid in self.tertiary_map.items():
-                if aid in level3_ids:
-                    self.tertiary_list.selection_set(idx)
+        ids_by_level = {}
+        for attr in attrs:
+            ids_by_level.setdefault(attr["level"], set()).add(attr["id"])
+
+        for level in range(1, len(self.attribute_levels) + 1):
+            selected_ids = ids_by_level.get(level, set())
+            if not selected_ids:
+                break
+            level_ui = self._get_level_ui(level)
+            for idx, aid in level_ui["map"].items():
+                if aid in selected_ids:
+                    level_ui["listbox"].selection_set(idx)
+            self.on_attribute_level_change(level)
+
+    def delete_selected_record(self):
+        if not self._require_db():
+            return
+
+        sel = self.record_list.curselection()
+        if not sel:
+            self._show_forced_popup("안내", "삭제할 기록을 선택하세요.")
+            return
+
+        rid = self._record_index.get(sel[0])
+        if rid is None:
+            return
+
+        row, _ = self.db.get_record(rid)
+        if not row:
+            self._show_forced_popup("안내", "삭제할 기록을 찾지 못했습니다.")
+            return
+
+        if not messagebox.askyesno("삭제 확인", f"선택한 기록을 삭제하시겠습니까?\n\nID: {rid}\n제목: {row['title']}"):
+            return
+
+        try:
+            self.db.delete_record(rid)
+            if self.current_record_id == rid:
+                self.current_record_id = None
+            self.refresh_records()
+            self.new_record()
+            self.status.configure(text=f"삭제 완료 | ID: {rid} | 제목: {row['title']}")
+            self._show_forced_popup("삭제 완료", f"기록(ID: {rid})을 DB에서 삭제했습니다.")
+        except Exception as exc:
+            self.status.configure(text=f"삭제 실패 | ID: {rid} | 오류: {exc}")
+            self._show_forced_popup("삭제 실패", f"기록 삭제 중 오류가 발생했습니다.\n\n오류: {exc}")
 
     def new_record(self):
         self.current_record_id = None
         self.title_entry.delete(0, END)
         self.body_text.delete("1.0", END)
-        self.primary_list.selection_clear(0, END)
-        self.secondary_list.delete(0, END)
-        self.secondary_list.selection_clear(0, END)
-        self.tertiary_list.delete(0, END)
-        self.tertiary_list.selection_clear(0, END)
-        self.primary_new.delete(0, END)
-        self.secondary_new.delete(0, END)
-        self.tertiary_new.delete(0, END)
+        self.populate_root_attributes()
+        for level_ui in self.attribute_levels:
+            level_ui["listbox"].selection_clear(0, END)
+            level_ui["entry"].delete(0, END)
 
     @staticmethod
     def _parse_new_attribute_names(raw: str):
         return [name.strip() for name in raw.split(",") if name.strip()]
 
     def _resolve_attribute_ids(self):
-        selected_primary = self.primary_list.curselection()
-        primary_names = self._parse_new_attribute_names(self.primary_new.get().strip())
-        if not selected_primary and not primary_names:
-            raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
+        if not self._require_db():
+            raise RuntimeError("DB를 사용할 수 없습니다.")
 
-        primary_ids = {self.primary_map[idx] for idx in selected_primary}
-        for primary_name in primary_names:
-            primary_ids.add(self.db.find_or_create_attribute(primary_name, 1, None))
+        all_ids = set()
+        parent_ids = None
 
-        if primary_names:
-            self.populate_primary_attributes()
+        for level in range(1, len(self.attribute_levels) + 1):
+            level_ui = self._get_level_ui(level)
+            selected_ids = self._selected_ids_for_level(level)
+            new_names = self._parse_new_attribute_names(level_ui["entry"].get().strip())
 
-        selected_secondary = self.secondary_list.curselection()
-        secondary_names = self._parse_new_attribute_names(self.secondary_new.get().strip())
-        secondary_ids = {self.secondary_map[idx] for idx in selected_secondary}
+            if level == 1 and not selected_ids and not new_names:
+                raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
 
-        for secondary_name in secondary_names:
-            for p_id in primary_ids:
-                secondary_ids.add(self.db.find_or_create_attribute(secondary_name, 2, p_id))
+            if new_names and level > 1 and not parent_ids:
+                raise ValueError(f"{level}차 Attribute를 추가하려면 {level - 1}차를 먼저 선택하세요.")
 
-        if secondary_names:
-            self.on_primary_change()
+            created_ids = set()
+            for name in new_names:
+                if level == 1:
+                    created_ids.add(self.db.find_or_create_attribute(name, level, None))
+                else:
+                    for p_id in parent_ids:
+                        created_ids.add(self.db.find_or_create_attribute(name, level, p_id))
 
-        selected_tertiary = self.tertiary_list.curselection()
-        tertiary_names = self._parse_new_attribute_names(self.tertiary_new.get().strip())
-        tertiary_ids = {self.tertiary_map[idx] for idx in selected_tertiary}
+            current_ids = selected_ids | created_ids
+            if level == 1 and not current_ids:
+                raise ValueError("1차 Attribute는 반드시 지정해야 합니다.")
 
-        for tertiary_name in tertiary_names:
-            for s_id in secondary_ids:
-                tertiary_ids.add(self.db.find_or_create_attribute(tertiary_name, 3, s_id))
+            all_ids |= current_ids
+            parent_ids = current_ids
 
-        if tertiary_names:
-            self.on_secondary_change()
+            if new_names:
+                if level == 1:
+                    self.populate_root_attributes()
+                else:
+                    self.on_attribute_level_change(level - 1)
 
-        return list(primary_ids | secondary_ids | tertiary_ids)
+        return list(all_ids)
 
     def save_record(self):
+        if not self._require_db():
+            return
+
         title = self.title_entry.get().strip()
         body = self.body_text.get("1.0", END).strip()
         if not title or not body:
-            messagebox.showwarning("안내", "제목과 본문을 입력하세요.")
+            self.status.configure(text="저장 실패 | 제목과 본문을 입력하세요.")
+            self._show_forced_popup("안내", "제목과 본문을 입력하세요.")
             return
         try:
             attribute_ids = self._resolve_attribute_ids()
         except ValueError as e:
-            messagebox.showwarning("안내", str(e))
+            self.status.configure(text=f"저장 실패 | {e}")
+            self._show_forced_popup("안내", str(e))
             return
 
         created_at = datetime.now().isoformat(timespec="seconds")
@@ -608,49 +757,86 @@ class RecordApp:
             persisted, _ = self.db.get_record(rid)
             if not persisted:
                 raise RuntimeError("저장 직후 DB에서 레코드를 다시 찾지 못했습니다.")
+            if not self.db.verify_record_persisted(rid):
+                raise RuntimeError("새 DB 연결에서 저장된 레코드가 확인되지 않았습니다.")
+
+            file_exists, file_size = self.db.verify_disk_artifacts()
+            db_file = Path(self.db.db_path)
+            if not file_exists:
+                raise RuntimeError(f"DB 파일이 생성되지 않았습니다: {db_file}")
+            if file_size <= 0:
+                raise RuntimeError(f"DB 파일 크기가 비정상입니다: {db_file} (size={file_size})")
+
+            if os.name == "nt":
+                expected_root = Path(DEFAULT_EXPORT_PATH)
+                db_parent = Path(self.db.db_path).parent.resolve()
+                expected_parent = expected_root.resolve()
+                if db_parent != expected_parent:
+                    raise RuntimeError(
+                        f"DB 경로가 예상과 다릅니다. 현재: {db_parent}, 예상: {expected_parent}"
+                    )
+
+            self.current_record_id = rid
+            self.refresh_records()
+            db_location = str(Path(self.db.db_path).resolve())
+
+            word_ok, word_message = self._export_to_word(title, body, created_at)
+            if word_ok:
+                self.status.configure(
+                    text=f"저장 완료 | DB 파일: {db_location} | 워드 파일: {word_message}"
+                )
+            else:
+                self.status.configure(
+                    text=f"저장 부분 완료 | DB 파일: {db_location} | 워드 저장 실패: {word_message}"
+                )
+
+            self._show_forced_popup(
+                "저장 완료",
+                (
+                    f"기록이 저장되었습니다.\n\n"
+                    f"레코드 ID: {rid}\n"
+                    f"DB 저장 위치:\n{db_location}\n"
+                    f"DB 파일 크기: {Path(self.db.db_path).stat().st_size} bytes\n\n"
+                    f"워드 저장 결과: {word_message}"
+                ),
+            )
+
+            try:
+                db_log_path = Path(self.db.db_path).parent / "save_audit.log"
+                db_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with db_log_path.open("a", encoding="utf-8") as fp:
+                    fp.write(f"{datetime.now().isoformat(timespec='seconds')} | rid={rid} | db={db_location}\n")
+            except Exception:
+                pass
+
         except Exception as exc:
-            messagebox.showerror(
+            self._show_forced_popup(
                 "저장 실패",
                 f"DB 저장 실패: {exc}\n\n현재 DB 경로: {self.db.db_path}",
             )
             self.status.configure(text=f"저장 실패 | DB 경로: {self.db.db_path} | 오류: {exc}")
             return
 
-        self.current_record_id = rid
-        self.refresh_records()
-        db_location = str(Path(self.db.db_path).resolve())
-        self.status.configure(text=f"저장 완료 | DB 파일: {db_location} | 워드 저장 경로: {self.export_path}")
-        self._show_forced_popup(
-            "저장 완료",
-            f"기록이 저장되었습니다.\n\nDB 저장 위치:\n{db_location}",
-        )
 
-        try:
-            SAVE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with SAVE_LOG_PATH.open("a", encoding="utf-8") as fp:
-                fp.write(f"{datetime.now().isoformat(timespec='seconds')} | rid={rid} | db={db_location}\n")
-        except Exception:
-            pass
-
-        self._export_to_word(title, body, created_at)
-
-    def _export_to_word(self, title: str, body: str, created_at: str):
+    def _export_to_word(self, title: str, body: str, created_at: str) -> tuple[bool, str]:
         if Document is None:
-            self.status.configure(text="python-docx가 없어 워드 저장을 건너뜀")
-            return
+            return False, "python-docx 모듈을 찾을 수 없습니다. build_exe.bat로 다시 빌드해 주세요."
         try:
             date_folder = created_at[:10]
             target_dir = Path(self.export_path) / date_folder
             target_dir.mkdir(parents=True, exist_ok=True)
             filename = normalize_filename(f"{date_folder}: {title}") + ".docx"
+            output_path = target_dir / filename
+            if output_path.exists():
+                output_path.unlink()
             doc = Document()
             doc.add_heading(title, level=1)
             doc.add_paragraph(f"기록일시: {created_at}")
             doc.add_paragraph(body)
-            doc.save(target_dir / filename)
-            self.status.configure(text=f"워드 저장 완료: {target_dir / filename}")
+            doc.save(output_path)
+            return True, str(output_path)
         except Exception as exc:
-            self.status.configure(text=f"워드 저장 실패(기록 본문 저장은 완료): {exc}")
+            return False, str(exc)
 
 
 def main():
